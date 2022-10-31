@@ -1,10 +1,12 @@
 package com.pig4cloud.plugin.cache.support;
 
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.pig4cloud.plugin.cache.enums.CacheOperation;
 import com.pig4cloud.plugin.cache.properties.CacheConfigProperties;
+import lombok.Getter;
+import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.Cache;
-import org.springframework.cache.CacheManager;
 import org.springframework.data.redis.core.RedisTemplate;
 
 import java.time.Duration;
@@ -19,9 +21,11 @@ import java.util.function.Consumer;
  * @version 1.0.0
  */
 @Slf4j
+@Getter
+@Setter
 public class RedisCaffeineCacheManager implements CacheManager {
 
-	private ConcurrentMap<String, Cache> cacheMap = new ConcurrentHashMap<String, Cache>();
+	private ConcurrentMap<String, Cache> cacheMap = new ConcurrentHashMap<>();
 
 	private CacheConfigProperties cacheConfigProperties;
 
@@ -31,6 +35,8 @@ public class RedisCaffeineCacheManager implements CacheManager {
 
 	private Set<String> cacheNames;
 
+	private Object serverId;
+
 	public RedisCaffeineCacheManager(CacheConfigProperties cacheConfigProperties,
 			RedisTemplate<Object, Object> stringKeyRedisTemplate) {
 		super();
@@ -38,6 +44,7 @@ public class RedisCaffeineCacheManager implements CacheManager {
 		this.stringKeyRedisTemplate = stringKeyRedisTemplate;
 		this.dynamic = cacheConfigProperties.isDynamic();
 		this.cacheNames = cacheConfigProperties.getCacheNames();
+		this.serverId = cacheConfigProperties.getServerId();
 	}
 
 	@Override
@@ -47,16 +54,30 @@ public class RedisCaffeineCacheManager implements CacheManager {
 			return cache;
 		}
 		if (!dynamic && !cacheNames.contains(name)) {
-			return cache;
+			return null;
 		}
 
-		cache = new RedisCaffeineCache(name, stringKeyRedisTemplate, caffeineCache(), cacheConfigProperties);
+		cache = createCache(name);
 		Cache oldCache = cacheMap.putIfAbsent(name, cache);
 		log.debug("create cache instance, the cache name is : {}", name);
 		return oldCache == null ? cache : oldCache;
 	}
 
+	@Override
+	@SuppressWarnings("unchecked")
+	public <K, V> com.github.benmanes.caffeine.cache.Cache<K, V> getCaffeineCache(String name) {
+		return (com.github.benmanes.caffeine.cache.Cache<K, V>) getCache(name);
+	}
+
+	public RedisCaffeineCache createCache(String name) {
+		return new RedisCaffeineCache(name, stringKeyRedisTemplate, caffeineCache(), cacheConfigProperties);
+	}
+
 	public com.github.benmanes.caffeine.cache.Cache<Object, Object> caffeineCache() {
+		return caffeineCacheBuilder().build();
+	}
+
+	public Caffeine<Object, Object> caffeineCacheBuilder() {
 		Caffeine<Object, Object> cacheBuilder = Caffeine.newBuilder();
 		doIfPresent(cacheConfigProperties.getCaffeine().getExpireAfterAccess(), cacheBuilder::expireAfterAccess);
 		doIfPresent(cacheConfigProperties.getCaffeine().getExpireAfterWrite(), cacheBuilder::expireAfterWrite);
@@ -84,10 +105,11 @@ public class RedisCaffeineCacheManager implements CacheManager {
 				break;
 			case SOFT:
 				cacheBuilder.softValues();
+				break;
 			default:
 			}
 		}
-		return cacheBuilder.build();
+		return cacheBuilder;
 	}
 
 	protected static void doIfPresent(Duration duration, Consumer<Duration> consumer) {
@@ -102,13 +124,23 @@ public class RedisCaffeineCacheManager implements CacheManager {
 	}
 
 	public void clearLocal(String cacheName, Object key) {
+		clearLocal(cacheName, key, CacheOperation.EVICT);
+	}
+
+	@SuppressWarnings("unchecked")
+	public void clearLocal(String cacheName, Object key, CacheOperation operation) {
 		Cache cache = cacheMap.get(cacheName);
 		if (cache == null) {
 			return;
 		}
 
 		RedisCaffeineCache redisCaffeineCache = (RedisCaffeineCache) cache;
-		redisCaffeineCache.clearLocal(key);
+		if (CacheOperation.EVICT_BATCH.equals(operation)) {
+			redisCaffeineCache.clearLocalBatch((Iterable<Object>) key);
+		}
+		else {
+			redisCaffeineCache.clearLocal(key);
+		}
 	}
 
 }
